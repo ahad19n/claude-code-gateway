@@ -94,17 +94,10 @@ Route 53; otherwise add the record wherever the domain's DNS is hosted.)
 
 ## 3. Gateway
 
-### Copy the project to the server
+### Clone the project
 
-From your PC (PowerShell includes `scp`):
-
-    scp -i path\to\lightsail-key.pem claude-code-gateway.zip admin@<static-ip>:~
-
-On the server:
-
-    sudo apt install -y unzip
-    unzip claude-code-gateway.zip
-    sudo mv claude-code-gateway /opt/claude-code-gateway
+    sudo apt install -y git
+    sudo git clone https://github.com/ahad19n/claude-code-gateway.git /opt/claude-code-gateway
     sudo chown -R admin:admin /opt/claude-code-gateway
     cd /opt/claude-code-gateway
 
@@ -165,6 +158,18 @@ Memory check:
 
     free -m
     docker stats --no-stream
+
+### Updating
+
+    cd /opt/claude-code-gateway
+    git pull
+    docker compose up -d --build
+    docker compose ps                                # "(healthy)" after ~30 s
+
+`.env`, `secrets/` and `certs/` aren't tracked by git, so a pull never touches
+them, and the usage database lives in the `gateway-data` volume. Don't edit
+tracked files on the server (including `chmod`), or `git pull` will refuse to
+update; `git status` shows what changed and `git checkout -- <file>` undoes it.
 
 ## 4. Workstations
 
