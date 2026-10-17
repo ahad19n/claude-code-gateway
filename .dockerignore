@@ -1,0 +1,5 @@
+secrets/
+certs/
+.env
+*.zip
+.git

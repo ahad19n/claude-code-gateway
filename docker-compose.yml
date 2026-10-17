@@ -1,0 +1,42 @@
+services:
+  gateway:
+    build: .
+    image: claude-gateway:latest
+    container_name: claude-gateway
+    restart: unless-stopped
+    init: true
+    ports:
+      - "443:8443"
+    environment:
+      TOKEN_FILE: /run/secrets/setup_token
+      TLS_CERT_FILE: /certs/fullchain.pem
+      TLS_KEY_FILE: /certs/privkey.pem
+      NODE_OPTIONS: --disable-warning=ExperimentalWarning --max-old-space-size=96
+      GLOBAL_BLOCKED_MODELS: ${GLOBAL_BLOCKED_MODELS:-}
+      UPSTREAM_BASE_URL: ${UPSTREAM_BASE_URL:-https://api.anthropic.com}
+      ADD_OAUTH_BETA: ${ADD_OAUTH_BETA:-0}
+      STRICT_PATHS: ${STRICT_PATHS:-0}
+      LOG_HEADERS: ${LOG_HEADERS:-0}
+    secrets:
+      - setup_token
+    volumes:
+      - gateway-data:/data
+      - ./certs:/certs:ro          # written by certbot's deploy hook (deploy/setup-cert.sh)
+    mem_limit: 192m
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+secrets:
+  setup_token:
+    file: ./secrets/setup-token
+
+volumes:
+  gateway-data:
