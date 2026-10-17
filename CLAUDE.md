@@ -145,8 +145,17 @@ wasn't tested.
 
 ## Deployment
 
-AWS Lightsail, $5/month plan (512 MB), Debian, public IPv4 and a static IP,
-1 GB swap. `deploy/setup-cert.sh` assumes apt (Debian/Ubuntu). Route 53 A record `claude.semafore.co` → static IP. Lightsail firewall:
+AWS Lightsail, $5/month plan (512 MB, 447 MB usable), Debian, public IPv4 and
+a static IP. 1 GB swap file with `vm.swappiness=10`; unattended-upgrades for
+security updates. Docker from Docker's official apt repo (Compose plugin).
+Project lives in `/opt/claude-gateway`, owned by the `admin` user.
+`deploy/setup-cert.sh` assumes apt (Debian/Ubuntu). The README has every
+setup command in order; keep it in sync when deployment changes.
+
+Measured on the instance: Debian idle ~80 MB used, ~120 MB after Docker
+(~330 MB available). The gateway adds ~50–80 MB normally.
+
+Route 53 A record `claude.semafore.co` → static IP. Lightsail firewall:
 22, 80, 443 only. Memory is the tight constraint; that's why there is no
 reverse proxy and no extra containers.
 
@@ -172,6 +181,9 @@ docker compose exec gateway gw <command>
   rule stands.
 - `TRUST_PROXY=1` makes logs use `X-Forwarded-For`; off by default because
   there is no proxy and clients could spoof it.
+- `GLOBAL_BLOCKED_MODELS=*fable*` is set in `.env` on the server. `.env`
+  changes need `docker compose up -d` (recreates the container); `restart`
+  doesn't re-read `.env`. Global blocks can't be overridden per workstation.
 - Memory limit 192 MB with `--max-old-space-size=96` (set in compose, which
   overrides the Dockerfile's `NODE_OPTIONS`).
 - Secret: `secrets/setup-token`, mounted at `/run/secrets/setup_token`.
