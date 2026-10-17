@@ -104,11 +104,11 @@ On the server:
 
     sudo apt install -y unzip
     unzip claude-gateway.zip
-    sudo mv claude-gateway /opt/
-    sudo chown -R admin:admin /opt/claude-gateway
-    cd /opt/claude-gateway
+    sudo mv claude-gateway /opt/claude-code-gateway
+    sudo chown -R admin:admin /opt/claude-code-gateway
+    cd /opt/claude-code-gateway
 
-All commands from here on run in `/opt/claude-gateway`.
+All commands from here on run in `/opt/claude-code-gateway`.
 
 ### HTTPS certificate
 
@@ -117,8 +117,11 @@ Ports 80 and 443 must be open in the Lightsail firewall and DNS must resolve.
     sudo ./deploy/setup-cert.sh claude.semafore.co you@example.com
 
 The email is optional (expiry notices). This installs certbot, gets the
-certificate, copies it into `./certs`, and enables automatic renewal. If you
-move the folder later, run it again.
+certificate, copies it into `./certs`, and enables automatic renewal. The
+renewal hook records this folder's path, so if you move or rename the folder
+later, run the script again from the new location. Check the recorded path:
+
+    sudo grep certs /etc/letsencrypt/renewal-hooks/deploy/claude-gateway.sh
 
 ### Setup-token
 
