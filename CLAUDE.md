@@ -148,7 +148,9 @@ wasn't tested.
 AWS Lightsail, $5/month plan (512 MB, 447 MB usable), Debian, public IPv4 and
 a static IP. 1 GB swap file with `vm.swappiness=10`; unattended-upgrades for
 security updates. Docker from Docker's official apt repo (Compose plugin).
-Project lives in `/opt/claude-gateway`, owned by the `admin` user.
+Project lives in `/opt/claude-code-gateway`, owned by the `admin` user. The
+certbot deploy hook hard-codes that folder's `certs/` path; if the folder moves,
+rerun `deploy/setup-cert.sh` from the new location.
 `deploy/setup-cert.sh` assumes apt (Debian/Ubuntu). The README has every
 setup command in order; keep it in sync when deployment changes.
 
