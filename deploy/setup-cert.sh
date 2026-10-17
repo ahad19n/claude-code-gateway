@@ -20,7 +20,8 @@ fi
 
 GW_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 CERT_DIR="$GW_DIR/certs"
-HOOK="/etc/letsencrypt/renewal-hooks/deploy/claude-gateway.sh"
+HOOK="/etc/letsencrypt/renewal-hooks/deploy/claude-code-gateway.sh"
+OLD_HOOK="/etc/letsencrypt/renewal-hooks/deploy/claude-gateway.sh"   # name before the rename
 LIVE="/etc/letsencrypt/live/$DOMAIN"
 
 echo "==> Installing certbot"
@@ -29,6 +30,7 @@ apt-get install -y -qq certbot
 
 echo "==> Writing deploy hook: $HOOK"
 mkdir -p "$(dirname "$HOOK")"
+rm -f "$OLD_HOOK"
 cat > "$HOOK" <<HOOK_EOF
 #!/bin/sh
 # Copies the renewed certificate where the gateway container can read it

@@ -4,7 +4,7 @@
  * Claude Code gateway — standalone proxy
  *
  * Workstations run Claude Code with:
- *   ANTHROPIC_BASE_URL=http://<server>:8443
+ *   ANTHROPIC_BASE_URL=https://<gateway-domain>
  *   ANTHROPIC_AUTH_TOKEN=<workstation key from `gw add`>
  *
  * The proxy authenticates the workstation, applies its model block list,
@@ -143,7 +143,7 @@ function windowInfo(h, name, now) {
   const hasReset = resetMs !== null && resetMs <= now;
   return {
     utilization: hasReset ? 0 : util,
-    status: h[`anthropic-ratelimit-unified-${name}-status`] || null,
+    status: hasReset ? null : h[`anthropic-ratelimit-unified-${name}-status`] || null,
     resets_at: resetMs !== null && !hasReset ? new Date(resetMs).toISOString() : null,
     resets_in_seconds: resetMs !== null && !hasReset ? Math.round((resetMs - now) / 1000) : null,
     reset_since_last_request: hasReset,
@@ -370,7 +370,10 @@ function forward(id, req, res, ws, rec, record, body) {
     });
     upRes.pipe(res);
 
-    const finalize = (aborted) => {
+    let finalized = false;
+    const finalize = (abortedBy) => {   // null | 'client' | 'upstream'
+      if (finalized) return;
+      finalized = true;
       let usage = {};
       if (parser) {
         usage = parser.state.usage;
@@ -383,14 +386,23 @@ function forward(id, req, res, ws, rec, record, body) {
         } catch { /* non-JSON body */ }
       }
       Object.assign(rec, normalizeUsage(usage));
-      if (aborted) rec.outcome = 'client_aborted';
-      else if (rec.status >= 400 || rec.error_type) rec.outcome = 'upstream_error';
+      if (abortedBy === 'client') rec.outcome = 'client_aborted';
+      else if (abortedBy === 'upstream') {
+        rec.outcome = 'upstream_error';
+        rec.error_type = rec.error_type || 'upstream_aborted';
+      } else if (rec.status >= 400 || rec.error_type) rec.outcome = 'upstream_error';
       record();
     };
 
-    upRes.on('end', () => finalize(false));
-    upRes.on('aborted', () => finalize(true));
-    res.on('close', () => { if (!res.writableFinished) finalize(true); });
+    upRes.on('end', () => finalize(null));
+    // Anthropic dropped the connection mid-response. Break ours too, so the
+    // workstation sees a failed stream (and retries) instead of waiting forever.
+    upRes.on('close', () => {
+      if (upRes.complete) return;
+      finalize('upstream');
+      res.destroy();
+    });
+    res.on('close', () => { if (!res.writableFinished) finalize('client'); });
   });
 
   upReq.on('error', (err) => {

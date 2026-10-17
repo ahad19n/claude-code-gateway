@@ -98,13 +98,13 @@ Route 53; otherwise add the record wherever the domain's DNS is hosted.)
 
 From your PC (PowerShell includes `scp`):
 
-    scp -i path\to\lightsail-key.pem claude-gateway.zip admin@<static-ip>:~
+    scp -i path\to\lightsail-key.pem claude-code-gateway.zip admin@<static-ip>:~
 
 On the server:
 
     sudo apt install -y unzip
-    unzip claude-gateway.zip
-    sudo mv claude-gateway /opt/claude-code-gateway
+    unzip claude-code-gateway.zip
+    sudo mv claude-code-gateway /opt/claude-code-gateway
     sudo chown -R admin:admin /opt/claude-code-gateway
     cd /opt/claude-code-gateway
 
@@ -121,7 +121,7 @@ certificate, copies it into `./certs`, and enables automatic renewal. The
 renewal hook records this folder's path, so if you move or rename the folder
 later, run the script again from the new location. Check the recorded path:
 
-    sudo grep certs /etc/letsencrypt/renewal-hooks/deploy/claude-gateway.sh
+    sudo grep certs /etc/letsencrypt/renewal-hooks/deploy/claude-code-gateway.sh
 
 ### Setup-token
 

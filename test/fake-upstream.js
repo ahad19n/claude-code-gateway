@@ -6,7 +6,8 @@
  *   node test/fake-upstream.js [port=9999] [chunkDelayMs=10]
  *
  * Point the gateway at it with UPSTREAM_BASE_URL=http://127.0.0.1:9999.
- * Model "err" returns a 429; count_tokens returns JSON; everything else streams
+ * Model "err" returns a 429; model "drop" sends message_start then cuts the
+ * connection; count_tokens returns JSON; everything else streams
  * SSE with usage (incl. cache and web search) and rate-limit headers.
  */
 const http = require('http');
@@ -41,6 +42,10 @@ http.createServer((req, res) => {
       return res.end('{"type":"error","error":{"type":"rate_limit_error","message":"fake limit"}}');
     }
     res.writeHead(200, { 'content-type': 'text/event-stream', ...rl });
+    if (model === 'drop') {
+      res.write(`event: message_start\ndata: ${JSON.stringify({ type: 'message_start', message: { usage: { input_tokens: 10, output_tokens: 1 } } })}\n\n`);
+      return setTimeout(() => res.socket.destroy(), delay);
+    }
     const events = [
       { type: 'message_start', message: { usage: { input_tokens: 10, cache_creation_input_tokens: 5, cache_read_input_tokens: 100, output_tokens: 1 } } },
       { type: 'content_block_delta', delta: { type: 'text_delta', text: 'héllo' } },

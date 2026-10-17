@@ -57,6 +57,7 @@ src/db.js             SQLite schema (created on open), key generation and hashin
 src/policy.js         glob model patterns ("*fable*"), case-insensitive
 src/usage-parser.js   SSE + JSON usage extraction
 src/cli.js            `gw` admin CLI (workstations, blocks, reports, CSV export)
+src/healthcheck.js    Docker HEALTHCHECK (HTTP or HTTPS to 127.0.0.1, cert not verified)
 workstation/          status-line scripts for workstations (bash + PowerShell)
 test/fake-upstream.js fake Anthropic API for local testing
 deploy/setup-cert.sh  one-time certbot setup (standalone, port 80) + renewal deploy hook
@@ -80,8 +81,9 @@ Dockerfile, docker-compose.yml, .env.example, README.md
 8. Forward, stream back, parse usage, store `anthropic-ratelimit-*` headers in
    `plan_status`, write one `usage` row via `record()` (guarded to run once).
 
-Outcomes: `ok`, `blocked`, `upstream_error`, `client_aborted` (partial usage
-kept), `gateway_error`.
+Outcomes: `ok`, `blocked`, `upstream_error` (incl. `upstream_aborted` when
+Anthropic drops mid-stream; the client connection is then destroyed too),
+`client_aborted` (partial usage kept), `gateway_error`.
 
 ## Data
 
@@ -136,7 +138,9 @@ it with curl. Before handing over any change, check at least: streaming body
 arrives intact, the upstream sees `Bearer <setup-token>` and not the
 workstation key, usage row has the right counts, blocked model → 403 and a
 `blocked` row, bad key → 401, `/gateway/status` works and isn't recorded, a
-client abort mid-stream records `client_aborted`, and every `gw` command runs.
+client abort mid-stream records `client_aborted`, an upstream drop (model
+`drop`) closes the client connection and records `upstream_error` /
+`upstream_aborted`, and every `gw` command runs.
 `node test/fake-upstream.js 9998 700` gives a slow stream for abort tests.
 
 Final check is always a real Claude Code session against the real gateway.

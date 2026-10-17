@@ -1,8 +1,8 @@
 services:
   gateway:
     build: .
-    image: claude-gateway:latest
-    container_name: claude-gateway
+    image: claude-code-gateway:latest
+    container_name: claude-code-gateway
     restart: unless-stopped
     init: true
     ports:

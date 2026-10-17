@@ -88,7 +88,7 @@ function setBlocked(db, name, list) {
 function printKey(name, key) {
   console.log(`Key for "${name}" (shown once — store it now):\n\n  ${key}\n`);
   console.log('On the workstation:');
-  console.log('  ANTHROPIC_BASE_URL=http://<gateway-host>:8443');
+  console.log('  ANTHROPIC_BASE_URL=https://<gateway-domain>');
   console.log(`  ANTHROPIC_AUTH_TOKEN=${key}`);
 }
 
