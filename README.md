@@ -14,19 +14,70 @@ while renewing; the gateway reloads renewed certificates without a restart.
    the newest **Debian** image Lightsail offers (lightest on memory; Ubuntu
    also works but runs more in the background).
 2. **Networking → Attach static IP.** Free while attached; keeps the address
-   fixed.
+   fixed. Use this IP everywhere below.
 3. **Networking → IPv4 Firewall:** allow TCP 22 (SSH), 80 and 443. Nothing else.
    Port 80 is only used by certbot while issuing or renewing the certificate,
    but it must be reachable from anywhere for that. If your workstations have
    static IPs, you can restrict 443 to them.
-4. SSH in, install Docker and add swap:
 
-       curl -fsSL https://get.docker.com | sudo sh
-       sudo usermod -aG docker $USER      # log out and back in afterwards
+SSH in (`ssh -i path/to/lightsail-key.pem admin@<static-ip>`), then:
 
-       sudo fallocate -l 1G /swapfile && sudo chmod 600 /swapfile
-       sudo mkswap /swapfile && sudo swapon /swapfile
-       echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
+### Swap (do this first)
+
+512 MB is enough for the gateway, with 1 GB of swap as a safety margin:
+
+    sudo fallocate -l 1G /swapfile
+    sudo chmod 600 /swapfile
+    sudo mkswap /swapfile
+    sudo swapon /swapfile
+    echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
+
+Only use swap when memory actually runs short:
+
+    echo 'vm.swappiness=10' | sudo tee /etc/sysctl.d/99-swappiness.conf
+    sudo sysctl -p /etc/sysctl.d/99-swappiness.conf
+
+`free -m` should now show `Swap: 1023`.
+
+### System updates
+
+    sudo apt update
+    sudo apt full-upgrade -y
+
+If a new kernel was installed (`linux-image` in the output), `sudo reboot`.
+
+Automatic security updates (choose "Yes" when asked):
+
+    sudo apt install -y unattended-upgrades
+    sudo dpkg-reconfigure -plow unattended-upgrades
+
+These don't reboot by themselves; reboot after kernel updates when convenient.
+The gateway and swap come back on their own.
+
+### Docker
+
+From Docker's official repository (includes the Compose plugin):
+
+    sudo apt-get update
+    sudo apt-get install -y ca-certificates curl
+    sudo install -m 0755 -d /etc/apt/keyrings
+    sudo curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc
+    sudo chmod a+r /etc/apt/keyrings/docker.asc
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+    sudo apt-get update
+    sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+
+Run Docker without `sudo` (log out and SSH back in afterwards):
+
+    sudo usermod -aG docker $USER
+
+Check:
+
+    systemctl is-enabled docker        # enabled
+    docker compose version
+    docker run --rm hello-world        # "Hello from Docker!"
+
+Expected memory at this point: roughly 120 MB used, 330 MB available.
 
 ## 2. DNS (Route 53)
 
@@ -34,41 +85,83 @@ In the hosted zone for `semafore.co`, create:
 
     Name: claude    Type: A    Value: <the static IP>
 
-Wait until `nslookup claude.semafore.co` returns the static IP before the next
-step. (Route 53 only answers for the domain if the domain's nameservers point
-to Route 53; otherwise add the record wherever the domain's DNS is hosted.)
+Wait until it resolves to the static IP before the next step:
+
+    getent hosts claude.semafore.co
+
+(Route 53 only answers for the domain if the domain's nameservers point to
+Route 53; otherwise add the record wherever the domain's DNS is hosted.)
 
 ## 3. Gateway
 
-Copy this folder to the instance (e.g. `/opt/claude-gateway`), then in it:
+### Copy the project to the server
 
-1. Get the HTTPS certificate and set up automatic renewal:
+From your PC (PowerShell includes `scp`):
 
-       sudo ./deploy/setup-cert.sh claude.semafore.co you@example.com
+    scp -i path\to\lightsail-key.pem claude-gateway.zip admin@<static-ip>:~
 
-   The email is optional (expiry notices). This installs certbot, gets the
-   certificate, copies it into `./certs`, and enables certbot's renewal
-   timer. If you move the folder later, run the script again.
+On the server:
 
-2. Create the token on a trusted machine with a browser (not on a workstation):
+    sudo apt install -y unzip
+    unzip claude-gateway.zip
+    sudo mv claude-gateway /opt/
+    sudo chown -R admin:admin /opt/claude-gateway
+    cd /opt/claude-gateway
 
-       claude setup-token
+All commands from here on run in `/opt/claude-gateway`.
 
-3. Save it on the instance:
+### HTTPS certificate
 
-       printf '%s' 'sk-ant-oat01-...' > secrets/setup-token
-       chmod 600 secrets/setup-token
-       sudo chown 1000:1000 secrets/setup-token     # container runs as uid 1000
+Ports 80 and 443 must be open in the Lightsail firewall and DNS must resolve.
 
-4. Optional: `cp .env.example .env` and edit. To block Fable everywhere:
+    sudo ./deploy/setup-cert.sh claude.semafore.co you@example.com
 
-       GLOBAL_BLOCKED_MODELS=*fable*
+The email is optional (expiry notices). This installs certbot, gets the
+certificate, copies it into `./certs`, and enables automatic renewal. If you
+move the folder later, run it again.
 
-5. Start:
+### Setup-token
 
-       docker compose up -d --build
-       docker compose logs -f        # "listening on https://..."
-       curl https://claude.semafore.co/health        # {"ok":true}
+Create it on a trusted machine with a browser (not on a workstation):
+
+    claude setup-token
+
+Save it on the server:
+
+    printf '%s' 'sk-ant-oat01-...' > secrets/setup-token
+    chmod 600 secrets/setup-token
+    sudo chown 1000:1000 secrets/setup-token     # container runs as uid 1000
+
+### Settings: block Fable on every workstation
+
+    cp .env.example .env
+    nano .env
+
+Set:
+
+    GLOBAL_BLOCKED_MODELS=*fable*
+
+(Comma-separate several patterns, e.g. `*fable*,*mythos*`. The global list
+can't be overridden per workstation; for per-workstation blocks use
+`gw block` instead.)
+
+After changing `.env` later, apply it with `docker compose up -d` (a plain
+`restart` doesn't re-read `.env`).
+
+### Start
+
+    docker compose up -d --build
+    docker compose logs -f                           # Ctrl+C to stop watching
+
+The log should show `listening on https://...` and
+`global blocked: *fable*`. Then check from the server or your PC:
+
+    curl https://claude.semafore.co/health           # {"ok":true}
+
+Memory check:
+
+    free -m
+    docker stats --no-stream
 
 ## 4. Workstations
 
