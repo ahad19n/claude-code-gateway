@@ -12,6 +12,7 @@ What it does, and nothing more:
 3. Swaps in the Max `claude setup-token` and forwards the request unchanged.
 4. Records token usage per workstation in SQLite.
 5. Serves Max 5h/7d utilization to workstation status lines.
+6. Serves files in `public/` (workstation setup scripts) at `/<name>`, no auth.
 
 ## Hard rules
 
@@ -58,7 +59,9 @@ src/policy.js         glob model patterns ("*fable*"), case-insensitive
 src/usage-parser.js   SSE + JSON usage extraction
 src/cli.js            `gw` admin CLI (workstations, blocks, reports, CSV export)
 src/healthcheck.js    Docker HEALTHCHECK (HTTP or HTTPS to 127.0.0.1, cert not verified)
-workstation/          status-line scripts for workstations (bash + PowerShell)
+public/               served at /<name> without auth (bind-mounted read-only); public, so never put keys here
+  setup.ps1, setup.sh            workstation setup: key check via /gateway/status, settings.json, status line
+  gateway-statusline.{ps1,sh}    status-line scripts, downloaded by the setup scripts
 test/fake-upstream.js fake Anthropic API for local testing
 deploy/setup-cert.sh  one-time certbot setup (standalone, port 80) + renewal deploy hook
 Dockerfile, docker-compose.yml, .env.example, README.md
@@ -68,17 +71,20 @@ Dockerfile, docker-compose.yml, .env.example, README.md
 
 1. `HEAD|GET /api/hello` → 200 locally, no auth (Claude Code startup check).
 2. `GET /health` → DB ping, no auth.
-3. Key from `Authorization: Bearer` or `x-api-key` → sha256 → workstation row.
+3. `GET|HEAD /<name>` where `public/<name>` is a file → served, no auth,
+   logged as `PUBLIC`. Single path segment only, no dotfiles; anything else
+   falls through to the steps below.
+4. Key from `Authorization: Bearer` or `x-api-key` → sha256 → workstation row.
    Unknown → 401 (logged, not recorded).
-4. `GET /gateway/status` → plan status for this workstation, text or
+5. `GET /gateway/status` → plan status for this workstation, text or
    `?format=json`, `?color=1` for ANSI. Not forwarded, not recorded, not logged
    (status lines poll it constantly).
-5. Disabled workstation → 403, recorded as `blocked`.
-6. Paths other than `/v1/messages` and `/v1/messages/count_tokens` are
+6. Disabled workstation → 403, recorded as `blocked`.
+7. Paths other than `/v1/messages` and `/v1/messages/count_tokens` are
    forwarded and logged as `UNLISTED PATH` (or 404 with `STRICT_PATHS=1`).
-7. Body buffered (32 MB cap); `model` read for policy; global then
+8. Body buffered (32 MB cap); `model` read for policy; global then
    per-workstation block patterns → 403 `permission_error`, recorded.
-8. Forward, stream back, parse usage, store `anthropic-ratelimit-*` headers in
+9. Forward, stream back, parse usage, store `anthropic-ratelimit-*` headers in
    `plan_status`, write one `usage` row via `record()` (guarded to run once).
 
 Outcomes: `ok`, `blocked`, `upstream_error` (incl. `upstream_aborted` when

@@ -15,6 +15,7 @@
 const http = require('http');
 const https = require('https');
 const fs = require('fs');
+const { join, extname } = require('path');
 const crypto = require('crypto');
 const { open, hashKey } = require('./db');
 const { parsePatterns, blockingPattern } = require('./policy');
@@ -47,6 +48,14 @@ const REDACT = new Set(['authorization', 'x-api-key', 'cookie']);
 // Reverse-proxy headers (if any proxy is ever put in front, or a client sends them); never forwarded.
 const PROXY_HEADERS = new Set(['x-forwarded-for', 'x-forwarded-proto', 'x-forwarded-host',
   'x-forwarded-port', 'x-real-ip', 'forwarded', 'via']);
+
+// Public files (workstation setup scripts), served at /<name> without auth.
+const PUBLIC_DIR = join(__dirname, '..', 'public');
+const PUBLIC_TYPES = {
+  '.ps1': 'text/plain; charset=utf-8', '.sh': 'text/plain; charset=utf-8',
+  '.txt': 'text/plain; charset=utf-8', '.md': 'text/plain; charset=utf-8',
+  '.json': 'application/json', '.html': 'text/html; charset=utf-8',
+};
 
 function loadToken() {
   let value = '';
@@ -200,6 +209,28 @@ function statusText(st, color) {
   return parts.join(' | ');
 }
 
+// ---------- public files ----------
+
+// Serves public/<name> if it exists. Only plain files directly in public/:
+// no subfolders, dotfiles or encoded characters, so a path can't reach
+// outside it. Returns false to let the request go through the normal flow.
+function servePublic(id, req, res, urlPath) {
+  if (req.method !== 'GET' && req.method !== 'HEAD') return false;
+  const name = urlPath.slice(1);
+  if (!/^[A-Za-z0-9_-][A-Za-z0-9._-]*$/.test(name)) return false;
+  let data;
+  try { data = fs.readFileSync(join(PUBLIC_DIR, name)); } catch { return false; }
+  req.resume();
+  res.writeHead(200, {
+    'content-type': PUBLIC_TYPES[extname(name).toLowerCase()] || 'application/octet-stream',
+    'content-length': data.length,
+    'cache-control': 'no-cache',
+  });
+  res.end(req.method === 'HEAD' ? undefined : data);
+  log(id, `PUBLIC ${req.method} ${urlPath}`, { from: clientIp(req) });
+  return true;
+}
+
 // ---------- request handling ----------
 
 function handle(req, res) {
@@ -220,6 +251,8 @@ function handle(req, res) {
     res.end(JSON.stringify({ ok }));
     return;
   }
+
+  if (servePublic(id, req, res, path)) return;
 
   const key = presentedKey(req);
   const ws = key ? safeDb('auth', () => q.findWs.get(hashKey(key))) : null;

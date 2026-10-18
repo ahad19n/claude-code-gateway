@@ -22,6 +22,7 @@ services:
     volumes:
       - gateway-data:/data
       - ./certs:/certs:ro          # written by certbot's deploy hook (deploy/setup-cert.sh)
+      - ./public:/app/public:ro    # served at /<name> without auth; live after git pull
     mem_limit: 192m
     read_only: true
     cap_drop:

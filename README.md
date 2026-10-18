@@ -176,13 +176,26 @@ update; `git status` shows what changed and `git checkout -- <file>` undoes it.
     docker compose exec gateway gw add ws1 --block "*fable*"
     docker compose exec gateway gw add ws2
 
-Each `add` prints the workstation's key once. On that workstation set:
+Each `add` prints the workstation's key once. On the workstation, run the
+setup script and paste the key when asked:
 
-    ANTHROPIC_BASE_URL=https://claude.semafore.co
-    ANTHROPIC_AUTH_TOKEN=<key>
+    irm https://claude.semafore.co/setup.ps1 | iex           # Windows PowerShell
+    curl -fsSL https://claude.semafore.co/setup.sh | bash    # macOS / Linux
 
-and make sure `ANTHROPIC_API_KEY` and `CLAUDE_CODE_OAUTH_TOKEN` are not set.
-Don't run `claude login` on the workstations.
+It installs Claude Code if needed, checks the key against the gateway, and
+writes `~/.claude/settings.json` (keeping what's already there, with a backup):
+`ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN`,
+`ENABLE_CLAUDEAI_MCP_SERVERS=false` (claude.ai connectors can't work through
+the gateway, so this hides their warning) and the status line below. It
+removes `ANTHROPIC_API_KEY` and `CLAUDE_CODE_OAUTH_TOKEN` from the settings
+and, on Windows, from the user environment, and removes any pinned
+`ANTHROPIC_MODEL` so Claude Code's default and `/model` apply. Re-run it after
+`gw rotate`.
+
+To do it by hand instead: set `ANTHROPIC_BASE_URL=https://claude.semafore.co`
+and `ANTHROPIC_AUTH_TOKEN=<key>`, and make sure `ANTHROPIC_API_KEY` and
+`CLAUDE_CODE_OAUTH_TOKEN` are not set. Don't run `claude login` on the
+workstations.
 
 Changes made with `gw` take effect on the next request; no restart needed.
 
@@ -190,8 +203,8 @@ Changes made with `gw` take effect on the next request; no restart needed.
 
 Workstations can't use `/usage`, because they aren't logged in to claude.ai.
 Instead, the gateway serves the 5-hour and 7-day figures to each workstation
-at `GET /gateway/status` (authenticated with the workstation's key), and the
-scripts in `workstation/` put them in Claude Code's status line:
+at `GET /gateway/status` (authenticated with the workstation's key), and
+`public/gateway-statusline.{sh,ps1}` put them in Claude Code's status line:
 
     5h 21% (1h56m) | 7d 25% (1d9h) | ws1 24h 1.2M tok
 
@@ -199,8 +212,9 @@ The time in brackets is until that window resets. The last part is this
 workstation's tokens over the past 24 hours (input + cache writes + output;
 cache reads are left out because they're tiny in cost but huge in count).
 
-Copy one script to the workstation's `~/.claude/` folder and add to
-`~/.claude/settings.json`:
+The setup script installs this. By hand: download
+`https://claude.semafore.co/gateway-statusline.sh` (or `.ps1`) into the
+workstation's `~/.claude/` folder and add to `~/.claude/settings.json`:
 
 Git Bash / Linux / macOS:
 
@@ -218,6 +232,22 @@ status line says "gateway unreachable" while Claude Code itself works, set
 The figures come from Anthropic's response headers, so they update whenever
 any workstation makes a request. If a window has reset since the last
 request, it shows 0%.
+
+## Public files (setup scripts)
+
+Anything in `public/` is served at `https://claude.semafore.co/<name>` without
+a key, for example:
+
+    irm https://claude.semafore.co/setup.ps1 | iex           # PowerShell
+    curl -fsSL https://claude.semafore.co/setup.sh | bash    # bash
+
+Only files directly in `public/` are served (no subfolders or dotfiles).
+`.ps1`, `.sh`, `.txt` and `.md` are served as plain text. The folder is mounted
+read-only into the container, so new or changed files are live straight after
+`git pull`, without a rebuild.
+
+These files are readable by anyone on the internet. Never put a workstation
+key or the setup-token in them; have scripts ask for the key instead.
 
 ## Commands
 
