@@ -10,6 +10,7 @@
  * The proxy authenticates the workstation, applies its model block list,
  * swaps in the Max setup-token, streams the request/response through
  * unchanged, and records token usage per workstation in SQLite.
+ * /gateway/admin/* is the web portal's admin API (admin-http.js).
  */
 
 const http = require('http');
@@ -20,6 +21,7 @@ const crypto = require('crypto');
 const { open, hashKey } = require('./db');
 const { parsePatterns, blockingPattern } = require('./policy');
 const { makeSseUsageParser, normalizeUsage } = require('./usage-parser');
+const adminApi = require('./admin-http');
 
 // ---------- config ----------
 
@@ -102,6 +104,8 @@ const q = {
 function safeDb(label, fn) {
   try { return fn(); } catch (err) { console.error(`DB error (${label}): ${err.message}`); return null; }
 }
+
+adminApi.init({ db, log, sendError, clientIp, windowInfo, globalBlocked: CONFIG.globalBlocked });
 
 // ---------- helpers ----------
 
@@ -252,6 +256,10 @@ function handle(req, res) {
     return;
   }
 
+  // Admin API. Handled before the workstation-key lookup and answered even
+  // when no route matches, so these paths are never forwarded upstream.
+  if (adminApi.isAdminPath(path)) return adminApi.handle(id, req, res, path);
+
   if (servePublic(id, req, res, path)) return;
 
   const key = presentedKey(req);
@@ -375,7 +383,13 @@ function forward(id, req, res, ws, rec, record, body) {
 
   if (CONFIG.logHeaders) log(id, 'request headers', redactHeaders(req.headers));
 
-  const target = new URL(req.url, CONFIG.upstream);
+  // Only the path and query come from the client. The host is always the
+  // configured upstream, so a request line like `//evil.com/...` or
+  // `http://evil.com/...` can't send the setup-token anywhere else.
+  const incoming = new URL(req.url, 'http://local');
+  const target = new URL(CONFIG.upstream.origin);
+  target.pathname = incoming.pathname;
+  target.search = incoming.search;
   const upReq = upstreamLib.request(target, { method: req.method, headers }, (upRes) => {
     rec.status = upRes.statusCode;
     rec.request_id = upRes.headers['request-id'] || null;
@@ -503,6 +517,7 @@ server.listen(CONFIG.port, CONFIG.host, () => {
   console.log(`  global blocked:    ${CONFIG.globalBlocked.length ? CONFIG.globalBlocked.join(', ') : '(none)'}`);
   console.log(`  oauth beta flag:   ${CONFIG.addOauthBeta ? 'added if missing' : 'not added'}`);
   console.log(`  strict paths:      ${CONFIG.strictPaths}`);
+  console.log(`  admin API:         ${adminApi.describe()}`);
   const count = safeDb('count', () => db.prepare('SELECT COUNT(*) AS n FROM workstations').get().n);
   console.log(`  workstations:      ${count ?? '?'}`);
 });

@@ -128,6 +128,30 @@ Save it on the server:
     chmod 600 secrets/setup-token
     sudo chown 1000:1000 secrets/setup-token     # container runs as uid 1000
 
+### Admin token (web portal)
+
+The [admin API](#admin-api) lets the web portal manage workstation keys and
+read usage. **Create this file before `docker compose up`**, even if you don't
+use the portal. Depending on the Compose version, a missing file either stops
+`docker compose up` with an error, or Docker creates an empty *directory*
+called `secrets/admin-token` in its place (the admin API then stays off). If
+that happened, remove it with `sudo rmdir secrets/admin-token` and create the
+file.
+
+To turn the admin API on:
+
+    openssl rand -base64 48 | tr -d '\n' > secrets/admin-token
+    chmod 600 secrets/admin-token
+    sudo chown 1000:1000 secrets/admin-token
+
+To keep it off, create an empty file instead (`touch secrets/admin-token`).
+A missing, empty or shorter-than-32-character token turns the admin API off,
+and every `/gateway/admin/...` path then returns 404. The proxy works either
+way.
+
+This token can create workstation keys. Put it only in the portal's
+**backend** environment, never in a browser or on a workstation.
+
 ### Settings: block Fable on every workstation
 
     cp .env.example .env
@@ -149,8 +173,9 @@ After changing `.env` later, apply it with `docker compose up -d` (a plain
     docker compose up -d --build
     docker compose logs -f                           # Ctrl+C to stop watching
 
-The log should show `listening on https://...` and
-`global blocked: *fable*`. Then check from the server or your PC:
+The log should show `listening on https://...`, `global blocked: *fable*`
+and `admin API: enabled, from any address` (or `disabled`, with the reason on
+the line above it). Then check from the server or your PC:
 
     curl https://claude.semafore.co/health           # {"ok":true}
 
@@ -167,7 +192,11 @@ Memory check:
     docker compose ps                                # "(healthy)" after ~30 s
 
 `.env`, `secrets/` and `certs/` aren't tracked by git, so a pull never touches
-them, and the usage database lives in the `gateway-data` volume. Don't edit
+them, and the usage database lives in the `gateway-data` volume.
+
+Updating from a version without the admin API: create `secrets/admin-token`
+before `docker compose up` (see [Admin token](#admin-token-web-portal); an
+empty file is fine). Don't edit
 tracked files on the server (including `chmod`), or `git pull` will refuse to
 update; `git status` shows what changed and `git checkout -- <file>` undoes it.
 
@@ -266,11 +295,103 @@ All run as `docker compose exec gateway gw <command>`:
     plan                                  Max 5-hour / 7-day utilization
     export --since 30d > usage.csv        raw rows as CSV
 
+`add`, `list`, `rotate`, `remove` and `export` are also available over HTTPS
+for the web portal; see [Admin API](#admin-api).
+
 Blocked requests return a clear error in Claude Code; switch with `/model`.
 If you block Haiku on a workstation, Claude Code's background tasks
 (titles, web-fetch summaries) also use Haiku, so point them at an allowed
 model with `ANTHROPIC_DEFAULT_HAIKU_MODEL` on that workstation (older Claude
 Code versions use `ANTHROPIC_SMALL_FAST_MODEL`).
+
+## Admin API
+
+For the web portal's backend, which calls it server to server. It is off
+until `secrets/admin-token` holds a token (see
+[Admin token](#admin-token-web-portal)).
+
+> **The admin token can create and rotate workstation keys.** Keep it only in
+> the portal backend's environment. Never send it to a browser (the API sends
+> no CORS headers, on purpose), never put it on a workstation, and don't log
+> it. Anyone who can use the portal can mint gateway keys, so the portal needs
+> its own login.
+
+- Authenticate with `Authorization: Bearer <admin token>`, and nothing else.
+  Workstation keys never work here.
+- Optional `ADMIN_ALLOWED_IPS` in `.env` (comma-separated) limits callers to
+  those addresses (403 otherwise). Set it if the portal backend has a fixed
+  outbound IP, then apply with `docker compose up -d`.
+- After 10 failed logins from one IP within 10 minutes, that IP gets 429 (with
+  `Retry-After`) until the 10 minutes are up, even with the right token.
+- Every response has `cache-control: no-store`. Errors use the same JSON
+  format as the rest of the gateway: `{"type":"error","error":{"type","message"}}`.
+- Admin requests are never forwarded to Anthropic and never recorded as usage.
+  Each one is logged as a single `ADMIN ...` line, without the token or keys.
+- To change the token: write a new one with the `openssl` command above, run
+  `docker compose restart gateway`, and update the portal.
+
+Examples (from the server; the portal backend does the same with its own HTTP
+client):
+
+    H="Authorization: Bearer $(cat secrets/admin-token)"
+    G=https://claude.semafore.co/gateway/admin
+
+    curl -H "$H" $G/workstations
+    curl -H "$H" -H 'content-type: application/json' \
+         -d '{"name":"ws6","blocked_models":["*fable*"]}' $G/workstations
+    curl -H "$H" -X POST $G/workstations/ws6/rotate
+    curl -H "$H" -X DELETE $G/workstations/ws6
+    curl -H "$H" "$G/sync?after_id=0&limit=1000"
+    curl -H "$H" -o usage.csv "$G/export.csv?since=30d&ws=ws1"
+
+| Request | Result |
+|---|---|
+| `GET /workstations` | `{global_blocked_models, workstations: [{name, enabled, blocked_models, created_at, last_seen_at}]}`. Never includes key hashes. |
+| `POST /workstations` | JSON body `{"name", "blocked_models"?}`, max 16 KB. Same rules as `gw add` (name: letters, digits, `.` `_` `-`, up to 64). **201** `{name, key, enabled, blocked_models, created_at}`. The key is only ever shown in this response. 409 if the name exists. |
+| `POST /workstations/{name}/rotate` | Like `gw rotate`: `{name, key}`. The old key stops working on its next request. 404 if unknown. |
+| `DELETE /workstations/{name}` | Like `gw remove` (usage history kept): `{name, removed: true}`. 404 if unknown. |
+| `GET /sync?after_id=&limit=` | Incremental copy of everything for the portal; see below. |
+| `GET /export.csv?since=&ws=` | Exactly the bytes `gw export` prints for the same `since` (`24h`, `7d`, `30d`, `all`, `YYYY-MM-DD`; default `all`) and `ws`. Streamed, as `usage-<date>.csv`. |
+
+Error statuses: 400 bad input, 401 bad token, 403 address not allowed, 404
+unknown path or workstation, 409 name exists, 413 body too large, 429 too many
+failed logins, 500 database error.
+
+### Sync contract
+
+The portal calls `GET /gateway/admin/sync` about once a minute and copies the
+result into its own database.
+
+- Usage rows are only ever inserted, never changed, and their `id` only
+  grows. So `id` is the cursor: send the highest `id` you've stored as
+  `after_id` (0 the first time). Don't use `ts`, because it is the request
+  **start** and rows are written at the **end**, so a long request can land
+  after rows with later times.
+- The response has rows with `id > after_id`, oldest first, at most `limit`
+  of them (default 1000, at most 5000; larger values are capped).
+  `usage.next_after_id` is the last row's id (or your `after_id` if there were
+  none), and `usage.has_more` is true when the page was full. Keep calling
+  with `after_id = next_after_id` while `has_more` is true.
+- Store a page and move your cursor in the same transaction, and insert by
+  `id` with "ignore if exists", so a retry after a failure never duplicates or
+  skips rows.
+- `workstations` is always the full current list; a name that disappears was
+  removed. If a removed name is added again, its old usage rows still carry
+  that name.
+- `plan` is `null` until the first request has been proxied. `five_hour` and
+  `seven_day` are computed at `generated_at` (utilization 0 and
+  `reset_since_last_request: true` if the window reset since the last
+  request). `raw_headers` holds the latest `anthropic-ratelimit-*` headers
+  (resets in unix seconds) so the portal can recompute that itself. The
+  figures only change when some workstation makes a request.
+- All timestamps (`ts`, `created_at`, `last_seen_at`, `generated_at`,
+  `plan.updated_at`) are UTC epoch milliseconds.
+
+Row fields: `id, ts, workstation, session_id, method, path, model, status,
+outcome` (`ok`, `blocked`, `upstream_error`, `client_aborted`,
+`gateway_error`), `input_tokens, output_tokens, cache_write_tokens,
+cache_read_tokens, web_search_requests, duration_ms, request_id, error_type,
+util_5h, util_7d`. The same fields, in the same order, as the CSV export.
 
 ## What gets recorded
 

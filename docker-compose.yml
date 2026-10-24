@@ -9,6 +9,7 @@ services:
       - "443:8443"
     environment:
       TOKEN_FILE: /run/secrets/setup_token
+      ADMIN_TOKEN_FILE: /run/secrets/admin_token
       TLS_CERT_FILE: /certs/fullchain.pem
       TLS_KEY_FILE: /certs/privkey.pem
       NODE_OPTIONS: --disable-warning=ExperimentalWarning --max-old-space-size=96
@@ -17,8 +18,10 @@ services:
       ADD_OAUTH_BETA: ${ADD_OAUTH_BETA:-0}
       STRICT_PATHS: ${STRICT_PATHS:-0}
       LOG_HEADERS: ${LOG_HEADERS:-0}
+      ADMIN_ALLOWED_IPS: ${ADMIN_ALLOWED_IPS:-}
     secrets:
       - setup_token
+      - admin_token
     volumes:
       - gateway-data:/data
       - ./certs:/certs:ro          # written by certbot's deploy hook (deploy/setup-cert.sh)
@@ -38,6 +41,8 @@ services:
 secrets:
   setup_token:
     file: ./secrets/setup-token
+  admin_token:                      # must exist; an empty file keeps the admin API off
+    file: ./secrets/admin-token
 
 volumes:
   gateway-data:

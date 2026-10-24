@@ -13,11 +13,25 @@ What it does, and nothing more:
 4. Records token usage per workstation in SQLite.
 5. Serves Max 5h/7d utilization to workstation status lines.
 6. Serves files in `public/` (workstation setup scripts) at `/<name>`, no auth.
+7. Admin API at `/gateway/admin/*` for the owner's web portal (separate app
+   with its own Postgres): workstation keys, usage sync, CSV export. Requested
+   by the owner in October 2026.
 
 ## Hard rules
 
 - **The setup-token never leaves the server.** Never log it, never put it in
   an error, never send it anywhere but the upstream base URL.
+- **The admin token is handled like the setup-token:** never logged, never
+  forwarded, never in an error. Only its sha256 is kept in memory, compared
+  with `timingSafeEqual`. It is never looked up in `workstations`, and a
+  workstation key never works on `/gateway/admin/*`. Admin responses carry
+  keys, so they are `cache-control: no-store`, and admin logs never include
+  headers or bodies.
+- **`/gateway/admin/*` is never forwarded upstream**, matched or not, and
+  never recorded in `usage`.
+- **Usage rows are insert-only.** The portal syncs by `usage.id` (cursor
+  `id > after_id`). Never UPDATE or DELETE usage rows and never reuse ids,
+  or the portal's copy silently drifts.
 - **Forward requests byte-for-byte.** Only these headers change: the
   workstation's `authorization`/`x-api-key` are removed, `authorization:
   Bearer <setup-token>` is set, `accept-encoding: identity` is forced, and
@@ -54,7 +68,10 @@ Don't add these unless the owner asks:
 
 ```
 src/server.js         HTTP proxy: auth, model policy, forwarding, metering, /gateway/status
-src/db.js             SQLite schema (created on open), key generation and hashing
+src/admin-http.js     admin API under /gateway/admin: token auth, IP allowlist, rate limit, routes, CSV streaming
+src/admin.js          workstation/usage operations shared by cli.js and admin-http.js (add, list, rotate,
+                      remove, --since parsing, CSV rows, sync query); expected failures throw err.kind
+src/db.js             SQLite schema (created on open), read-only connection, key generation and hashing
 src/policy.js         glob model patterns ("*fable*"), case-insensitive
 src/usage-parser.js   SSE + JSON usage extraction
 src/cli.js            `gw` admin CLI (workstations, blocks, reports, CSV export)
@@ -71,21 +88,29 @@ Dockerfile, docker-compose.yml, .env.example, README.md
 
 1. `HEAD|GET /api/hello` → 200 locally, no auth (Claude Code startup check).
 2. `GET /health` → DB ping, no auth.
-3. `GET|HEAD /<name>` where `public/<name>` is a file → served, no auth,
+3. `/gateway/admin` or `/gateway/admin/...` → admin router (`admin-http.js`),
+   **before** any workstation-key lookup, and it always answers (never falls
+   through, never forwarded, never recorded). In order: API disabled (no
+   valid `ADMIN_TOKEN_FILE`) → 404; `ADMIN_ALLOWED_IPS` set and `clientIp()`
+   not in it → 403; IP locked out (10 failed logins / 10 min, max 1,000 IPs
+   tracked) → 429; `Authorization: Bearer` ≠ admin token → 401 (counts as a
+   failure); no route → 404. Logged as `ADMIN <action> from <ip>` or
+   `ADMIN REJECT <status> ...`.
+4. `GET|HEAD /<name>` where `public/<name>` is a file → served, no auth,
    logged as `PUBLIC`. Single path segment only, no dotfiles; anything else
    falls through to the steps below.
-4. Key from `Authorization: Bearer` or `x-api-key` → sha256 → workstation row.
+5. Key from `Authorization: Bearer` or `x-api-key` → sha256 → workstation row.
    Unknown → 401 (logged, not recorded).
-5. `GET /gateway/status` → plan status for this workstation, text or
+6. `GET /gateway/status` → plan status for this workstation, text or
    `?format=json`, `?color=1` for ANSI. Not forwarded, not recorded, not logged
    (status lines poll it constantly).
-6. Disabled workstation → 403, recorded as `blocked`.
-7. Paths other than `/v1/messages` and `/v1/messages/count_tokens` are
+7. Disabled workstation → 403, recorded as `blocked`.
+8. Paths other than `/v1/messages` and `/v1/messages/count_tokens` are
    forwarded and logged as `UNLISTED PATH` (or 404 with `STRICT_PATHS=1`).
-8. Body buffered (32 MB cap); `model` read for policy; global then
+9. Body buffered (32 MB cap); `model` read for policy; global then
    per-workstation block patterns → 403 `permission_error`, recorded.
-9. Forward, stream back, parse usage, store `anthropic-ratelimit-*` headers in
-   `plan_status`, write one `usage` row via `record()` (guarded to run once).
+10. Forward, stream back, parse usage, store `anthropic-ratelimit-*` headers in
+    `plan_status`, write one `usage` row via `record()` (guarded to run once).
 
 Outcomes: `ok`, `blocked`, `upstream_error` (incl. `upstream_aborted` when
 Anthropic drops mid-stream; the client connection is then destroyed too),
@@ -102,6 +127,17 @@ request without a restart.
   cache_write / cache_read, plus web_search_requests, session_id (from
   `x-claude-code-session-id`), and util_5h / util_7d at that moment.
 - `plan_status`: single row with the latest `anthropic-ratelimit-*` headers.
+
+Admin DB work goes through `admin.js`, not `safeDb()`: expected failures
+throw with `err.kind` (`invalid` / `exists` / `not_found` → 400 / 409 / 404)
+and anything else becomes a 500, so "not found" never looks like a DB error.
+The CSV export streams with `iterate()` on its **own read-only connection**
+(`openReadOnly()`). A statement left open on the server's connection makes its
+usage inserts fail with `SQLITE_BUSY_SNAPSHOT` as soon as `gw` writes. The
+export scans in id order with `+ts` / `+workstation`, because the indexed plan
+sorts in a temp B-tree before the first row. That blocks the event loop, and
+large sorts need temp files that the read-only container can't create. Keep
+both properties.
 
 Schema changes: tables are created with `CREATE TABLE IF NOT EXISTS`, so
 existing databases are never migrated automatically. Add new columns with a
@@ -143,11 +179,26 @@ Then `DB_PATH=/tmp/gw.db node src/cli.js add ws1 --block "*fable*"` and drive
 it with curl. Before handing over any change, check at least: streaming body
 arrives intact, the upstream sees `Bearer <setup-token>` and not the
 workstation key, usage row has the right counts, blocked model → 403 and a
-`blocked` row, bad key → 401, `/gateway/status` works and isn't recorded, a
+`blocked` row, bad key → 401, a request line of `//other-host/v1/messages`,
+`http://other-host/v1/messages` or `/.//other-host/...` still goes to the
+upstream (never to other-host), `/gateway/status` works and isn't recorded, a
 client abort mid-stream records `client_aborted`, an upstream drop (model
 `drop`) closes the client connection and records `upstream_error` /
 `upstream_aborted`, and every `gw` command runs.
 `node test/fake-upstream.js 9998 700` gives a slow stream for abort tests.
+
+Admin API: add `ADMIN_TOKEN_FILE=<file with 32+ chars>` to the server command
+and check at least: without the file every `/gateway/admin/*` path is 404;
+wrong token, no token, the token in `x-api-key`, or a workstation key → 401
+and the fake upstream receives nothing; unmatched `/gateway/admin/foo` → 404;
+the 11th failure from one IP → 429; `ADMIN_ALLOWED_IPS` set to another IP →
+403; create → 201 and the key works, duplicate → 409, bad name → 400, body
+over 16 KB → 413; rotate → the old key gets 401; delete → the key gets 401
+and its usage rows stay; sync paging with a small `limit` returns every id
+exactly once and contains no `key_hash`; `export.csv` is byte-identical to
+`gw export` for the same `since`/`ws`; a large export doesn't hold up other
+requests (poll `/health` during it); aborting exports doesn't crash; and the
+log never contains the admin token or a workstation key.
 
 Final check is always a real Claude Code session against the real gateway.
 Docker isn't available in every dev environment; say so when the image build
@@ -200,6 +251,13 @@ docker compose exec gateway gw <command>
   overrides the Dockerfile's `NODE_OPTIONS`).
 - Secret: `secrets/setup-token`, mounted at `/run/secrets/setup_token`.
   The container runs as uid 1000; the file must be readable by it.
+- Secret: `secrets/admin-token`, mounted at `/run/secrets/admin_token`
+  (`ADMIN_TOKEN_FILE`). It must exist: depending on the Compose version, a
+  missing file either stops `up` or makes Docker create an empty directory at
+  `secrets/admin-token` (seen with Compose v5.5.1; the gateway then logs
+  `admin API disabled: cannot read ...`). An empty file keeps the admin API
+  off. Read once at startup, so restart after changing it.
+  `ADMIN_ALLOWED_IPS` comes from `.env` (listed in compose).
 - Container is read-only with all capabilities dropped; only `/data` is
   writable.
 - Workstations set `ANTHROPIC_BASE_URL=https://claude.semafore.co` and

@@ -58,6 +58,15 @@ function open() {
   return db;
 }
 
+// Separate connection for long reads (the streamed CSV export). A statement
+// left open on the server's own connection would make its usage writes fail
+// with SQLITE_BUSY_SNAPSHOT once anything else (e.g. `gw`) writes.
+function openReadOnly() {
+  const db = new DatabaseSync(DB_PATH, { readOnly: true });
+  db.exec('PRAGMA busy_timeout = 5000;');
+  return db;
+}
+
 function hashKey(key) {
   return crypto.createHash('sha256').update(key, 'utf8').digest('hex');
 }
@@ -67,4 +76,4 @@ function newKey(name) {
   return `gw-${slug}-${crypto.randomBytes(24).toString('base64url')}`;
 }
 
-module.exports = { open, hashKey, newKey, DB_PATH };
+module.exports = { open, openReadOnly, hashKey, newKey, DB_PATH };

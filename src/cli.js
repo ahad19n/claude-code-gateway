@@ -5,8 +5,9 @@
  * Run inside the container:  docker compose exec gateway gw <command>
  */
 
-const { open, hashKey, newKey } = require('./db');
+const { open } = require('./db');
 const { parsePatterns } = require('./policy');
+const admin = require('./admin');
 
 const HELP = `gw — Claude Code gateway admin
 
@@ -46,15 +47,6 @@ function parseArgs(argv) {
 
 function die(msg) { console.error(`error: ${msg}`); process.exit(1); }
 
-function sinceMs(value) {
-  if (!value || value === 'all') return 0;
-  const m = /^(\d+)([hd])$/.exec(value);
-  if (m) return Date.now() - Number(m[1]) * (m[2] === 'h' ? 3600e3 : 86400e3);
-  const d = Date.parse(value);
-  if (Number.isNaN(d)) die(`can't parse --since "${value}"`);
-  return d;
-}
-
 function fmtTime(ms) {
   if (!ms) return '-';
   return new Date(ms).toISOString().replace('T', ' ').slice(0, 16);
@@ -75,12 +67,6 @@ function table(rows, columns) {
   for (const row of cells) console.log(line(row));
 }
 
-function getWs(db, name) {
-  const ws = db.prepare('SELECT * FROM workstations WHERE name = ?').get(name);
-  if (!ws) die(`no workstation named "${name}"`);
-  return ws;
-}
-
 function setBlocked(db, name, list) {
   db.prepare('UPDATE workstations SET blocked_models = ? WHERE name = ?').run(JSON.stringify(list), name);
 }
@@ -98,59 +84,51 @@ const commands = {
   add(db, { pos, opts }) {
     const name = pos[0];
     if (!name) die('usage: gw add <name> [--block "<pattern>,..."]');
-    if (!/^[A-Za-z0-9._-]{1,64}$/.test(name)) die('name may only contain letters, digits, . _ -');
-    if (db.prepare('SELECT 1 FROM workstations WHERE name = ?').get(name)) die(`"${name}" already exists`);
-    const blocked = parsePatterns(typeof opts.block === 'string' ? opts.block : '');
-    const key = newKey(name);
-    db.prepare('INSERT INTO workstations (name, key_hash, blocked_models, created_at) VALUES (?, ?, ?, ?)')
-      .run(name, hashKey(key), JSON.stringify(blocked), Date.now());
-    console.log(`Added "${name}"${blocked.length ? `, blocked: ${blocked.join(', ')}` : ''}.`);
-    printKey(name, key);
+    const ws = admin.createWorkstation(db, name, typeof opts.block === 'string' ? opts.block : '');
+    const blocked = ws.blocked_models;
+    console.log(`Added "${ws.name}"${blocked.length ? `, blocked: ${blocked.join(', ')}` : ''}.`);
+    printKey(ws.name, ws.key);
   },
 
   list(db) {
     const global = parsePatterns(process.env.GLOBAL_BLOCKED_MODELS);
     if (global.length) console.log(`Global block list: ${global.join(', ')}\n`);
-    const rows = db.prepare('SELECT * FROM workstations ORDER BY name').all();
-    table(rows, [
+    table(admin.listWorkstations(db), [
       { key: 'name', label: 'WORKSTATION' },
       { key: 'enabled', label: 'STATUS', fmt: (v) => (v ? 'enabled' : 'DISABLED') },
-      { key: 'blocked_models', label: 'BLOCKED MODELS', fmt: (v) => JSON.parse(v).join(', ') || '-' },
+      { key: 'blocked_models', label: 'BLOCKED MODELS', fmt: (v) => v.join(', ') || '-' },
       { key: 'last_seen_at', label: 'LAST SEEN (UTC)', fmt: fmtTime },
       { key: 'created_at', label: 'CREATED (UTC)', fmt: fmtTime },
     ]);
   },
 
   rotate(db, { pos }) {
-    const ws = getWs(db, pos[0] || die('usage: gw rotate <name>'));
-    const key = newKey(ws.name);
-    db.prepare('UPDATE workstations SET key_hash = ? WHERE name = ?').run(hashKey(key), ws.name);
-    console.log(`Rotated "${ws.name}". The old key no longer works.`);
-    printKey(ws.name, key);
+    const { name, key } = admin.rotateKey(db, pos[0] || die('usage: gw rotate <name>'));
+    console.log(`Rotated "${name}". The old key no longer works.`);
+    printKey(name, key);
   },
 
   disable(db, { pos }) {
-    const ws = getWs(db, pos[0] || die('usage: gw disable <name>'));
+    const ws = admin.getWorkstation(db, pos[0] || die('usage: gw disable <name>'));
     db.prepare('UPDATE workstations SET enabled = 0 WHERE name = ?').run(ws.name);
     console.log(`Disabled "${ws.name}".`);
   },
 
   enable(db, { pos }) {
-    const ws = getWs(db, pos[0] || die('usage: gw enable <name>'));
+    const ws = admin.getWorkstation(db, pos[0] || die('usage: gw enable <name>'));
     db.prepare('UPDATE workstations SET enabled = 1 WHERE name = ?').run(ws.name);
     console.log(`Enabled "${ws.name}".`);
   },
 
   remove(db, { pos }) {
-    const ws = getWs(db, pos[0] || die('usage: gw remove <name>'));
-    db.prepare('DELETE FROM workstations WHERE name = ?').run(ws.name);
-    console.log(`Removed "${ws.name}". Its usage history is kept.`);
+    const { name } = admin.removeWorkstation(db, pos[0] || die('usage: gw remove <name>'));
+    console.log(`Removed "${name}". Its usage history is kept.`);
   },
 
   block(db, { pos }) {
     const [name, ...patterns] = pos;
     if (!name || !patterns.length) die('usage: gw block <name> <pattern> [...]');
-    const ws = getWs(db, name);
+    const ws = admin.getWorkstation(db, name);
     const list = parsePatterns(JSON.parse(ws.blocked_models));
     for (const p of parsePatterns(patterns.join(','))) if (!list.includes(p)) list.push(p);
     setBlocked(db, ws.name, list);
@@ -160,7 +138,7 @@ const commands = {
   unblock(db, { pos }) {
     const [name, ...patterns] = pos;
     if (!name || !patterns.length) die('usage: gw unblock <name> <pattern> [...]');
-    const ws = getWs(db, name);
+    const ws = admin.getWorkstation(db, name);
     const remove = new Set(parsePatterns(patterns.join(',')));
     const list = parsePatterns(JSON.parse(ws.blocked_models)).filter((p) => !remove.has(p));
     setBlocked(db, ws.name, list);
@@ -176,7 +154,7 @@ const commands = {
       session: "COALESCE(session_id, '(none)')",
     }[by];
     if (!groupExpr) die('--by must be workstation, model, day or session');
-    const params = { since: sinceMs(opts.since || '7d') };
+    const params = { since: admin.sinceMs(opts.since || '7d') };
     let where = 'ts >= :since';
     if (typeof opts.ws === 'string') { where += ' AND workstation = :ws'; params.ws = opts.ws; }
     const extraCols = by === 'session' ? ', workstation AS ws_name, MIN(ts) AS first_ts' : '';
@@ -244,22 +222,9 @@ const commands = {
   },
 
   export(db, { opts }) {
-    const params = { since: sinceMs(opts.since || 'all') };
-    let where = 'ts >= :since';
-    if (typeof opts.ws === 'string') { where += ' AND workstation = :ws'; params.ws = opts.ws; }
-    const rows = db.prepare(`SELECT * FROM usage WHERE ${where} ORDER BY id`).all(params);
-    const cols = ['id', 'ts', 'workstation', 'session_id', 'method', 'path', 'model', 'status', 'outcome',
-      'input_tokens', 'output_tokens', 'cache_write_tokens', 'cache_read_tokens', 'web_search_requests',
-      'duration_ms', 'request_id', 'error_type', 'util_5h', 'util_7d'];
-    const esc = (v) => {
-      if (v === null || v === undefined) return '';
-      const s = String(v);
-      return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
-    };
-    process.stdout.write(['iso_time', ...cols].join(',') + '\n');
-    for (const r of rows) {
-      process.stdout.write([new Date(r.ts).toISOString(), ...cols.map((c) => esc(r[c]))].join(',') + '\n');
-    }
+    const rows = admin.exportRows(db, admin.sinceMs(opts.since || 'all'), opts.ws);
+    process.stdout.write(admin.CSV_HEADER);
+    for (const r of rows) process.stdout.write(admin.csvLine(r));
   },
 };
 
@@ -273,4 +238,11 @@ if (!commands[cmd]) { console.error(`unknown command "${cmd}"\n`); console.log(H
 process.stdout.on('error', (err) => { if (err.code === 'EPIPE') process.exit(0); throw err; });
 
 const db = open();
-try { commands[cmd](db, parseArgs(rest)); } finally { db.close(); }
+try {
+  commands[cmd](db, parseArgs(rest));
+} catch (err) {
+  if (err.kind) die(err.message);   // expected failures from admin.js (bad name, not found, ...)
+  throw err;
+} finally {
+  db.close();
+}
